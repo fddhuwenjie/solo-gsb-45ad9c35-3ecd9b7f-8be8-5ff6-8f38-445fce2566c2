@@ -108,6 +108,37 @@
     border-radius: 6px; padding: 6px 10px; font-size: 12px; margin-top: 10px;
   }
   .chk { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+
+  /* 逐页复核 */
+  ul.reviewlist { list-style: none; margin: 0; padding: 0; }
+  ul.reviewlist li {
+    display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+    border-radius: 6px; font-size: 12px; cursor: pointer;
+    border: 1px solid transparent;
+  }
+  ul.reviewlist li:hover { background: var(--panel2); }
+  ul.reviewlist li.current { border-color: var(--accent); }
+  ul.reviewlist .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  ul.reviewlist .dot.pending { background: var(--warn); }
+  ul.reviewlist .dot.done { background: var(--ok); }
+  ul.reviewlist .pname { flex: none; }
+  ul.reviewlist .pstatus { margin-left: auto; color: var(--muted); }
+  ul.reviewlist li.done .pstatus { color: var(--ok); }
+  .reviewbar {
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px; margin-top: 10px;
+  }
+  .reviewbar .rb-title { font-size: 13px; margin-bottom: 6px; display: flex;
+                         align-items: center; gap: 8px; }
+  .reviewbar .rb-title .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px;
+                              border: 1px solid var(--line); color: var(--muted); }
+  .reviewbar .rb-title .tag.done { color: var(--ok); border-color: var(--ok); }
+  .reviewbar .rb-hint { color: var(--muted); font-size: 11.5px; margin: 4px 0 8px; }
+  .reviewbar .rb-hint.warn { color: var(--warn); }
+  .reviewbar button { width: 100%; }
+  .delivery-note { font-size: 11.5px; color: var(--muted); margin-top: 6px;
+                   word-break: break-all; }
+  .delivery-note .sha { color: var(--ok); }
 </style>
 </head>
 <body>
@@ -118,7 +149,8 @@
   <button class="btn" id="prevPageTop" disabled>‹ 上一页</button>
   <span class="badge" id="pageBadge">— / —</span>
   <button class="btn" id="nextPageTop" disabled>下一页 ›</button>
-  <button class="btn primary" id="downloadBtn" disabled>⬇ 下载遮盖副本</button>
+  <button class="btn" id="downloadBtn" disabled title="无需复核，随时可下载当前遮盖副本">⬇ 普通下载（PDF）</button>
+  <button class="btn primary" id="deliveryBtn" disabled>🏁 定版交付（ZIP）</button>
 </header>
 
 <main>
@@ -151,6 +183,8 @@
     </label>
     <div class="baked-note" id="bakedNote" hidden>
       此图由服务器用与下载完全相同的光栅化路径生成；该模式下不可编辑，关闭后继续画框。
+      此画面也是<b>逐页复核</b>的依据：加载后可"确认本页"，确认绑定本画面版本；
+      若期间框被改动，须重新加载预览，不能确认旧画面。
     </div>
 
     <h2>本页遮盖框 <span class="hint" id="boxCount"></span></h2>
@@ -158,6 +192,29 @@
     <button class="btn danger" id="clearPageBtn" style="width:100%;margin-top:8px" disabled>
       清空本页所有框
     </button>
+
+    <h2>逐页复核</h2>
+    <ul class="reviewlist" id="reviewList"></ul>
+    <div class="reviewbar" id="reviewBar" hidden>
+      <div class="rb-title">
+        第 <span id="rbPage">1</span> 页
+        <span class="tag" id="rbTag">待复核</span>
+      </div>
+      <div class="rb-hint" id="rbHint">勾选"最终效果预览（服务器烘焙）"加载该页的实际烘焙画面后，方可确认本页。</div>
+      <div class="rb-hint warn" id="rbStale" hidden>
+        ⚠ 此画面是旧版本：加载后本页遮盖框又被修改。请重新加载烘焙预览后再确认，不能把旧画面标为已复核。
+        <button class="btn" id="rbReload" style="width:100%;margin-top:6px">↻ 重新加载本页烘焙预览</button>
+      </div>
+      <button class="btn primary" id="confirmPageBtn" disabled>✔ 确认本页（绑定当前烘焙画面）</button>
+    </div>
+
+    <h2>定版交付</h2>
+    <div class="hint" style="margin-bottom:8px">
+      全部页面（含没有遮盖框的页）逐页确认后，可生成包含
+      <b>位图遮盖 PDF</b> 与 <b>manifest.json</b>（各页确认框数、PDF 的 SHA-256）的 ZIP。
+    </div>
+    <button class="btn primary" id="deliverySideBtn" style="width:100%" disabled>🏁 全部确认后生成定版 ZIP</button>
+    <div class="delivery-note" id="deliveryNote" hidden></div>
 
     <h2>操作说明</h2>
     <div class="hint">
@@ -198,11 +255,16 @@ const state = {
   filename: "document.pdf",
   pages: [],                 // [{index,width,height,rotation}]
   boxes: {},                 // pageIndex -> [{id,x0,y0,x1,y1,color}]
+  versions: {},              // pageIndex -> 服务器遮盖版本号
+  reviews: {},               // pageIndex(str) -> {confirmed,version,boxCount,confirmedVersion,...}
+  delivery: null,            // {id,pdfSha256,zipName,revoked,builtAt}
   page: 0,
   zoom: 1.0,
   imgScale: 1,               // CSS 像素 -> PDF 点 的系数（随底图尺寸更新）
   mode: "draw",
   baked: false,
+  loadedVersion: null,       // 当前展示画面烘焙时绑定的遮盖版本（仅 baked 模式）
+  loadSeq: 0,                // 预览请求序号，丢弃过期响应
   drag: null,                // {x0,y0,x1,y1} CSS 像素
   hoverId: null,
   busy: false,
@@ -254,12 +316,47 @@ function applyViewSize() {
   $("zoomLabel").textContent = Math.round(state.zoom * 100) + "%";
 }
 
+let imgObjectUrl = null;
+
+function applyImageBlob(blob) {
+  if (imgObjectUrl) URL.revokeObjectURL(imgObjectUrl);
+  imgObjectUrl = URL.createObjectURL(blob);
+  img.src = imgObjectUrl;
+}
+
 function loadPageImage() {
   if (!state.sid) return;
+  const seq = ++state.loadSeq;
+  const pageAtRequest = state.page;
   const red = state.baked ? "&redacted=true" : "";
-  img.src = `/api/${state.sid}/page/${state.page}.png?zoom=${RENDER_SCALE}${red}`;
-  img.onload = () => { applyViewSize(); render(); };
+  const url = `/api/${state.sid}/page/${state.page}.png?zoom=${RENDER_SCALE}${red}`;
+  state.loadedVersion = null;
+
+  if (!state.baked) {
+    // 干净底图无需版本头，直接用 <img src>（后端 Cache-Control: no-store）
+    if (imgObjectUrl) { URL.revokeObjectURL(imgObjectUrl); imgObjectUrl = null; }
+    img.src = url;
+    refreshReviewUi();
+    return;
+  }
+
+  // 烘焙预览必须读取该画面绑定的遮盖版本（X-Box-Version），复核确认时回传
+  fetch(url, { cache: "no-store" })
+    .then(async (res) => {
+      if (!res.ok) throw new Error("预览请求失败");
+      const ver = parseInt(res.headers.get("X-Box-Version") ?? "", 10);
+      const blob = await res.blob();
+      if (seq !== state.loadSeq || pageAtRequest !== state.page) return;
+      state.loadedVersion = Number.isFinite(ver) ? ver : null;
+      applyImageBlob(blob);
+      refreshReviewUi();
+    })
+    .catch(() => {
+      if (seq === state.loadSeq) toast("服务器烘焙预览加载失败，请重试。");
+    });
 }
+
+img.onload = () => { applyViewSize(); render(); };
 
 // ---------------------------------------------------------------------------
 // 遮盖框绘制（即时反映当前遮盖状态）
@@ -396,38 +493,46 @@ async function addBox(rect) {
       body: JSON.stringify({ page: state.page, rect }),
     });
     state.boxes[state.page].push({ id: out.id, ...out.rect });
-    render(); refreshBoxList();
+    state.versions[state.page] = out.version;
+    applyStatusPayload(out);
+    render(); refreshBoxList(); refreshReviewUi();
   } catch (err) { toast(err.message); render(); }
-  finally { state.busy = false; }
+  finally { state.busy = false; refreshChrome(); }
 }
 
 async function deleteBox(box) {
   state.busy = true;
   try {
-    await api(`/api/${state.sid}/boxes/delete`, {
+    const out = await api(`/api/${state.sid}/boxes/delete`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ page: state.page, id: box.id }),
     });
     state.boxes[state.page] = curBoxes().filter((b) => b.id !== box.id);
+    state.versions[state.page] = out.version;
+    applyStatusPayload(out);
     state.hoverId = null;
-    render(); refreshBoxList();
+    render(); refreshBoxList(); refreshReviewUi();
   } catch (err) { toast(err.message); }
-  finally { state.busy = false; }
+  finally { state.busy = false; refreshChrome(); }
 }
 
 async function clearPageBoxes() {
   if (!curBoxes().length) return;
   if (!confirm(`确定清空第 ${state.page + 1} 页的全部 ${curBoxes().length} 个遮盖框？`)) return;
+  state.busy = true;
   try {
-    await api(`/api/${state.sid}/boxes/clear`, {
+    const out = await api(`/api/${state.sid}/boxes/clear`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ page: state.page }),
     });
     state.boxes[state.page] = [];
-    render(); refreshBoxList();
+    state.versions[state.page] = out.version;
+    applyStatusPayload(out);
+    render(); refreshBoxList(); refreshReviewUi();
   } catch (err) { toast(err.message); }
+  finally { state.busy = false; refreshChrome(); }
 }
 
 // ---------------------------------------------------------------------------
@@ -481,11 +586,137 @@ function refreshChrome() {
   }
   $("stage").hidden = !has;
   $("zoombar").hidden = !has;
+  refreshReviewUi();
 }
 
 function escapeHtml(s) {
   return s.replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// ---------------------------------------------------------------------------
+// 逐页复核 / 定版交付状态
+// ---------------------------------------------------------------------------
+function reviewOf(i) {
+  return state.reviews[i] || { confirmed: false, version: state.versions[i] ?? 0,
+                               boxCount: (state.boxes[i] || []).length };
+}
+function confirmedCount() {
+  return state.pages.reduce((n, p) => n + (reviewOf(p.index).confirmed ? 1 : 0), 0);
+}
+function allConfirmed() {
+  return state.pages.length > 0 && confirmedCount() === state.pages.length;
+}
+
+function applyStatusPayload(data) {
+  if (data && data.reviews) state.reviews = data.reviews;
+  if (data && Object.prototype.hasOwnProperty.call(data, "delivery"))
+    state.delivery = data.delivery;
+}
+
+function refreshReviewList() {
+  const ul = $("reviewList");
+  ul.innerHTML = "";
+  state.pages.forEach((p) => {
+    const rv = reviewOf(p.index);
+    const li = document.createElement("li");
+    li.className = (rv.confirmed ? "done " : "") +
+                   (p.index === state.page ? "current" : "");
+    const dot = document.createElement("span");
+    dot.className = "dot " + (rv.confirmed ? "done" : "pending");
+    dot.title = rv.confirmed ? "已复核" : "待复核";
+    li.appendChild(dot);
+    const name = document.createElement("span");
+    name.className = "pname";
+    name.textContent = `第 ${p.index + 1} 页`;
+    li.appendChild(name);
+    const st = document.createElement("span");
+    st.className = "pstatus";
+    st.textContent = rv.confirmed
+      ? `已复核 · ${rv.boxCount} 框`
+      : `待复核 · ${rv.boxCount} 框`;
+    li.appendChild(st);
+    li.title = "点击跳到该页";
+    li.addEventListener("click", () => gotoPage(p.index));
+    ul.appendChild(li);
+  });
+}
+
+function refreshReviewUi() {
+  const has = !!state.sid;
+  $("reviewBar").hidden = !has;
+  if (!has) { refreshDeliveryUi(); refreshReviewList(); return; }
+
+  const i = state.page;
+  const rv = reviewOf(i);
+  const curVer = state.versions[i] ?? 0;
+  $("rbPage").textContent = i + 1;
+  const tag = $("rbTag");
+  tag.textContent = rv.confirmed ? "已复核" : "待复核";
+  tag.classList.toggle("done", rv.confirmed);
+
+  const hint = $("rbHint"), stale = $("rbStale");
+  const btn = $("confirmPageBtn");
+  hint.hidden = false;
+  stale.hidden = true;
+  btn.disabled = true;
+
+  if (!state.baked) {
+    hint.textContent = "勾选“最终效果预览（服务器烘焙）”加载该页的实际烘焙画面后，方可确认本页。";
+  } else if (state.loadedVersion === null) {
+    hint.textContent = "正在加载服务器烘焙预览…";
+  } else if (state.loadedVersion !== curVer) {
+    // 画面烘焙后本页框又被（其他请求）改动 —— 旧画面不得标为已复核
+    hint.hidden = true;
+    stale.hidden = false;
+  } else {
+    hint.textContent = rv.confirmed
+      ? `本页已复核（绑定版本 ${curVer}，${rv.boxCount} 个框）。画面仍为当前版本，可重新确认。`
+      : `当前烘焙画面为版本 ${curVer}（${rv.boxCount} 个框）。确认即绑定此画面；之后框被改动须重新预览。`;
+    btn.disabled = false;
+  }
+  btn.textContent = rv.confirmed ? "✔ 本页已复核（可重新确认）"
+                                 : "✔ 确认本页（绑定当前烘焙画面）";
+
+  refreshReviewList();
+  refreshDeliveryUi();
+}
+
+function refreshDeliveryUi() {
+  const has = !!state.sid;
+  const n = has ? confirmedCount() : 0;
+  const total = state.pages.length;
+  const d = state.delivery;
+  const live = d && !d.revoked;
+  const label = total ? `已复核 ${n} / ${total} 页` : "";
+
+  for (const id of ["deliveryBtn", "deliverySideBtn"]) {
+    const b = $(id);
+    b.disabled = !has || state.busy || !allConfirmed();
+    b.textContent = id === "deliveryBtn"
+      ? "🏁 定版交付（ZIP）"
+      : (allConfirmed() ? "🏁 生成 / 下载定版 ZIP"
+                        : `🏁 全部确认后生成定版 ZIP（${label}）`);
+    b.title = allConfirmed()
+      ? (live ? "下载当前定版交付包（PDF + manifest.json）"
+              : "按当前各页确认生成定版交付包（PDF + manifest.json）")
+      : "所有页面（含无遮盖框的页）都须先逐页确认";
+  }
+
+  const note = $("deliveryNote");
+  if (!has || !d) {
+    note.hidden = true;
+    note.textContent = "";
+  } else {
+    note.hidden = false;
+    if (d.revoked) {
+      note.innerHTML = "⚠ 上一定版包已因遮盖框修改被撤销，旧包不可再下载；重新确认受影响页并生成新包。";
+    } else {
+      note.innerHTML =
+        `当前定版包：<span class="sha">SHA-256 ${escapeHtml(d.pdfSha256.slice(0, 16))}…</span><br>` +
+        `不再修改时重复下载得到相同的包内 PDF 与匹配摘要。`;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -532,6 +763,7 @@ $("bakedToggle").addEventListener("change", async (e) => {
   $("bakedNote").hidden = !state.baked;
   loadPageImage();
   render();
+  refreshReviewUi();
 });
 
 $("zoomIn").addEventListener("click", () => setZoom(state.zoom * ZOOM_STEP));
@@ -540,6 +772,97 @@ $("zoomFit").addEventListener("click", zoomFit);
 $("prevPageTop").addEventListener("click", () => gotoPage(state.page - 1));
 $("nextPageTop").addEventListener("click", () => gotoPage(state.page + 1));
 $("clearPageBtn").addEventListener("click", clearPageBoxes);
+
+// ---------------------------------------------------------------------------
+// 逐页复核确认 / 定版交付
+// ---------------------------------------------------------------------------
+$("confirmPageBtn").addEventListener("click", async () => {
+  if (!state.sid || state.busy) return;
+  if (!state.baked || state.loadedVersion === null) return;
+  const page = state.page, version = state.loadedVersion;
+  state.busy = true; refreshChrome();
+  try {
+    const out = await api(`/api/${state.sid}/review/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page, version }),
+    });
+    state.versions[page] = out.version;
+    applyStatusPayload(out);
+    toast(`第 ${page + 1} 页已确认复核（${out.boxCount} 个框，版本 ${out.version}）。`, true);
+  } catch (err) {
+    toast(err.message);   // 409：画面过期，按提示重新加载烘焙预览
+    await syncFromState();
+  } finally {
+    state.busy = false;
+    refreshChrome();
+  }
+});
+
+async function downloadDelivery() {
+  if (!state.sid || state.busy || !allConfirmed()) return;
+  state.busy = true; refreshChrome();
+  try {
+    // 第一步：按当前各页确认生成（或复用）定版包；有失效确认时后端返回 409
+    let res = await fetch(
+      `/api/${state.sid}/delivery?filename=${encodeURIComponent(state.filename)}`,
+      { method: "POST" });
+    if (!res.ok) {
+      let detail = "生成定版包失败";
+      try { detail = (await res.json()).detail || detail; } catch (_) {}
+      throw new Error(detail);
+    }
+    const info = await res.json();
+    applyStatusPayload(info);
+
+    // 第二步：下载该定版包；若其间被编辑撤销，后端返回 410（拒绝过期包）
+    res = await fetch(`/api/${state.sid}/delivery/${info.deliveryId}`);
+    if (res.status === 410) {
+      await syncFromState();
+      throw new Error("定版包已因新的编辑被撤销，请重新复核后再生成。");
+    }
+    if (!res.ok) throw new Error("定版包下载失败");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = info.zipName;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    toast("定版交付包（位图遮盖 PDF + JSON 清单）已开始下载。", true);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    state.busy = false;
+    refreshChrome();
+  }
+}
+$("deliveryBtn").addEventListener("click", downloadDelivery);
+$("deliverySideBtn").addEventListener("click", downloadDelivery);
+$("rbReload").addEventListener("click", () => { if (state.baked) loadPageImage(); });
+
+// 周期性同步复核/交付状态：其他标签页或请求修改框时，本页状态及时失效
+async function syncFromState() {
+  if (!state.sid) return;
+  try {
+    const data = await api(`/api/${state.sid}/state`);
+    const serverVersions = {};
+    for (const [k, v] of Object.entries(data.versions || {})) serverVersions[k] = v;
+    const shown = state.loadedVersion;
+    const curShown = serverVersions[state.page] ?? 0;
+    state.boxes = {};
+    for (const [k, arr] of Object.entries(data.boxes || {})) state.boxes[k] = arr;
+    state.versions = serverVersions;
+    applyStatusPayload(data);
+    // 正在展示的烘焙画面若已落后于服务器版本，保持旧版本号 -> 界面显示"画面过期"
+    if (state.baked && shown !== null && shown !== curShown) {
+      state.loadedVersion = shown;
+    }
+    if (!state.drag) render();
+    refreshBoxList();
+    refreshChrome();
+  } catch (_) { /* 会话过期等情况保留当前界面，由用户操作触发提示 */ }
+}
+setInterval(syncFromState, 4000);
 
 img.addEventListener("error", () => toast("页面预览加载失败，请重试。"));
 
@@ -596,6 +919,10 @@ $("fileInput").addEventListener("change", async (e) => {
     state.pages = data.pages;
     state.page = 0;
     state.boxes = Object.fromEntries(data.pages.map((p) => [p.index, []]));
+    state.versions = Object.fromEntries(data.pages.map((p) => [p.index, 0]));
+    state.reviews = {};
+    state.delivery = null;
+    state.loadedVersion = null;
     state.baked = false;
     $("bakedToggle").checked = false;
     $("bakedNote").hidden = true;
