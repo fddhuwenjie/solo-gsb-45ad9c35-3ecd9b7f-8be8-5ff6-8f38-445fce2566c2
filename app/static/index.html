@@ -31,6 +31,8 @@
   .btn:disabled { opacity: .45; cursor: not-allowed; }
   .btn.primary { background: #0369a1; border-color: #0ea5e9; color: #fff; }
   .btn.primary:hover:not(:disabled) { background: #0284c7; color: #fff; }
+  .btn.success { background: #065f46; border-color: #10b981; color: #fff; }
+  .btn.success:hover:not(:disabled) { background: #047857; color: #fff; }
   .btn.danger { color: var(--danger); }
   .btn.danger:hover:not(:disabled) { border-color: var(--danger); }
   main { flex: 1; display: flex; min-height: 0; }
@@ -73,6 +75,33 @@
     border: 1px solid rgba(255,255,255,.3); flex: none; }
   ul.boxlist .del { margin-left: auto; color: var(--danger); }
   ul.boxlist .empty { color: var(--muted); cursor: default; }
+
+  /* 逐页复核 */
+  ul.revlist { list-style: none; margin: 0 0 8px; padding: 0; }
+  ul.revlist li {
+    display: flex; align-items: center; gap: 7px; padding: 5px 6px;
+    border-radius: 5px; font-size: 12px; cursor: pointer;
+  }
+  ul.revlist li:hover { background: var(--panel2); }
+  ul.revlist li.current { background: var(--panel2); outline: 1px solid var(--accent); }
+  ul.revlist .pgno { font-weight: 600; min-width: 34px; }
+  ul.revlist .meta { color: var(--muted); font-size: 11px; }
+  ul.revlist .pill {
+    margin-left: auto; font-size: 11px; padding: 1px 8px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
+  }
+  ul.revlist .pill.done { color: var(--ok); border-color: var(--ok); }
+  ul.revlist .pill.todo { color: var(--warn); border-color: var(--warn); }
+  .rev-note { font-size: 12px; color: var(--muted); margin: 0 0 8px; }
+  .stale-banner {
+    background: #7f1d1d; border: 1px solid var(--danger); color: #fee2e2;
+    border-radius: 6px; padding: 8px 10px; font-size: 12px; margin-top: 10px;
+  }
+  .stale-banner button {
+    margin-top: 6px; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--danger); border-radius: 5px; padding: 3px 10px;
+    cursor: pointer; font-size: 12px;
+  }
 
   /* 预览区 */
   .stage-wrap { flex: 1; overflow: auto; padding: 24px; position: relative; }
@@ -119,6 +148,11 @@
   <span class="badge" id="pageBadge">— / —</span>
   <button class="btn" id="nextPageTop" disabled>下一页 ›</button>
   <button class="btn primary" id="downloadBtn" disabled>⬇ 下载遮盖副本</button>
+  <button class="btn success" id="deliverBtn" disabled
+          title="全部页面逐页复核确认后，下载含位图遮盖 PDF 与 JSON 清单的 ZIP">
+    📦 定版交付（ZIP）
+  </button>
+  <span class="badge" id="reviewBadge">复核 0 / 0</span>
 </header>
 
 <main>
@@ -152,12 +186,32 @@
     <div class="baked-note" id="bakedNote" hidden>
       此图由服务器用与下载完全相同的光栅化路径生成；该模式下不可编辑，关闭后继续画框。
     </div>
+    <div class="stale-banner" id="staleBanner" hidden>
+      ⚠ 该页遮盖在预览之后已被修改，当前画面是<strong>旧画面</strong>，不能据此确认。
+      <button type="button" id="staleRepreview">重新预览最新画面</button>
+    </div>
 
     <h2>本页遮盖框 <span class="hint" id="boxCount"></span></h2>
     <ul class="boxlist" id="boxList"></ul>
     <button class="btn danger" id="clearPageBtn" style="width:100%;margin-top:8px" disabled>
       清空本页所有框
     </button>
+
+    <h2>逐页复核 <span class="hint" id="reviewCount"></span></h2>
+    <p class="rev-note">
+      打开每页的「服务器烘焙」预览并点击<strong>确认本页</strong>；
+      没有遮盖框的页面也必须确认。确认绑定当时画面，框被改动后须重新预览确认。
+    </p>
+    <ul class="revlist" id="reviewList"></ul>
+    <div class="row" style="gap:6px">
+      <button class="btn" id="confirmPageBtn" style="flex:1" disabled>✔ 确认本页</button>
+      <button class="btn" id="repreviewBtn" disabled>重新预览</button>
+    </div>
+    <div class="hint" id="confirmHint" style="margin-top:6px"></div>
+    <button class="btn success" id="deliverBtnSide" style="width:100%;margin-top:10px" disabled>
+      📦 全部确认后下载定版 ZIP
+    </button>
+    <div class="hint" id="deliverMeta" style="margin-top:6px"></div>
 
     <h2>操作说明</h2>
     <div class="hint">
@@ -198,11 +252,18 @@ const state = {
   filename: "document.pdf",
   pages: [],                 // [{index,width,height,rotation}]
   boxes: {},                 // pageIndex -> [{id,x0,y0,x1,y1,color}]
+  review: {},                // pageIndex -> {boxVersion,boxCount,confirmed,confirmedVersion}
+  allConfirmed: false,
   page: 0,
   zoom: 1.0,
   imgScale: 1,               // CSS 像素 -> PDF 点 的系数（随底图尺寸更新）
   mode: "draw",
   baked: false,
+  bakedVersion: null,        // 当前展示的烘焙画面所绑定的遮盖版本（来自 X-Box-Version）
+  bakedLoad: 0,              // 烘焙图请求代次，丢弃过期响应
+  bakedPage: null,           // 烘焙图请求发起时的页码
+  pollTimer: null,
+  deliverySha: null,         // 上一次定版交付包内 PDF 的 SHA-256（用于重复下载比对）
   drag: null,                // {x0,y0,x1,y1} CSS 像素
   hoverId: null,
   busy: false,
@@ -256,9 +317,39 @@ function applyViewSize() {
 
 function loadPageImage() {
   if (!state.sid) return;
-  const red = state.baked ? "&redacted=true" : "";
-  img.src = `/api/${state.sid}/page/${state.page}.png?zoom=${RENDER_SCALE}${red}`;
-  img.onload = () => { applyViewSize(); render(); };
+  if (state.baked) {
+    // 烘焙图必须拿到与画面同响应返回的遮盖版本（X-Box-Version），
+    // 确认该页时回传它；故用 fetch 取 blob 而非直接设置 img.src。
+    const gen = ++state.bakedLoad;
+    state.bakedPage = state.page;
+    img.removeAttribute("src");
+    fetch(`/api/${state.sid}/page/${state.page}.png?zoom=${RENDER_SCALE}&redacted=true`)
+      .then((res) => {
+        if (!res.ok) throw new Error("烘焙预览加载失败");
+        const ver = parseInt(res.headers.get("X-Box-Version") || "", 10);
+        return res.blob().then((blob) => ({ ver, blob }));
+      })
+      .then(({ ver, blob }) => {
+        if (gen !== state.bakedLoad || state.page !== state.bakedPage) return;
+        state.bakedVersion = Number.isFinite(ver) ? ver : null;
+        const url = URL.createObjectURL(blob);
+        img.src = url;
+        img.onload = () => { applyViewSize(); render(); refreshReviewUI(); };
+      })
+      .catch((err) => { if (gen === state.bakedLoad) toast(err.message); });
+    return;
+  }
+  // 干净底图（无版本令牌；确认必须走烘焙画面）
+  state.bakedVersion = null;
+  img.src = `/api/${state.sid}/page/${state.page}.png?zoom=${RENDER_SCALE}`;
+  img.onload = () => { applyViewSize(); render(); refreshReviewUI(); };
+}
+
+// 当前展示的烘焙画面是否已落后于该页遮盖版本（框在预览后被改动 -> 必须重新预览）
+function pageStale(p = state.page) {
+  if (!state.baked || p !== state.bakedPage || state.bakedVersion === null) return true;
+  const rv = state.review[p];
+  return !rv || rv.boxVersion !== state.bakedVersion;
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +489,11 @@ async function addBox(rect) {
     state.boxes[state.page].push({ id: out.id, ...out.rect });
     render(); refreshBoxList();
   } catch (err) { toast(err.message); render(); }
-  finally { state.busy = false; }
+  finally {
+    state.busy = false;
+    // 服务器已 bump 该页版本并撤销该页确认/旧交付包：拉取权威状态
+    await refreshState();
+  }
 }
 
 async function deleteBox(box) {
@@ -413,7 +508,10 @@ async function deleteBox(box) {
     state.hoverId = null;
     render(); refreshBoxList();
   } catch (err) { toast(err.message); }
-  finally { state.busy = false; }
+  finally {
+    state.busy = false;
+    await refreshState();
+  }
 }
 
 async function clearPageBoxes() {
@@ -428,6 +526,7 @@ async function clearPageBoxes() {
     state.boxes[state.page] = [];
     render(); refreshBoxList();
   } catch (err) { toast(err.message); }
+  await refreshState();
 }
 
 // ---------------------------------------------------------------------------
@@ -467,6 +566,7 @@ function refreshBoxList() {
 function refreshChrome() {
   const has = !!state.sid;
   $("downloadBtn").disabled = !has || state.busy;
+  $("deliverBtn").disabled = !has || !state.allConfirmed || state.busy;
   $("prevPageTop").disabled = !has || state.page === 0;
   $("nextPageTop").disabled = !has || state.page === state.pages.length - 1;
   $("pageBadge").textContent = has ? `${state.page + 1} / ${state.pages.length}` : "— / —";
@@ -489,6 +589,183 @@ function escapeHtml(s) {
 }
 
 // ---------------------------------------------------------------------------
+// 逐页复核状态（权威状态来自服务器；其他请求/标签页改框后也能及时看到失效）
+// ---------------------------------------------------------------------------
+function applyState(data) {
+  // 服务端框以 id 为准合并（当前用户本标签页的即时更新不会被轮询覆盖掉）
+  for (const k of Object.keys(data.boxes || {})) {
+    state.boxes[Number(k)] = data.boxes[k];
+  }
+  state.review = {};
+  for (const k of Object.keys(data.review.pages)) {
+    state.review[Number(k)] = data.review.pages[k];
+  }
+  state.allConfirmed = !!data.review.allConfirmed;
+  if (!state.allConfirmed) state.deliverySha = null;
+  refreshBoxList();
+  render();
+  refreshReviewUI();
+  refreshChrome();
+}
+
+async function refreshState(silent = true) {
+  if (!state.sid) return;
+  try {
+    const data = await api(`/api/${state.sid}/state`);
+    applyState(data);
+  } catch (err) {
+    if (!silent) toast(err.message);
+  }
+}
+
+function refreshReviewUI() {
+  const ul = $("reviewList");
+  ul.innerHTML = "";
+  let done = 0;
+  state.pages.forEach((p, i) => {
+    const rv = state.review[i];
+    const isDone = !!(rv && rv.confirmed);
+    if (isDone) done++;
+    const li = document.createElement("li");
+    if (i === state.page) li.className = "current";
+    const no = document.createElement("span");
+    no.className = "pgno";
+    no.textContent = `第 ${i + 1} 页`;
+    li.appendChild(no);
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = `${rv ? rv.boxCount : 0} 框`;
+    li.appendChild(meta);
+    const pill = document.createElement("span");
+    pill.className = "pill " + (isDone ? "done" : "todo");
+    pill.textContent = isDone
+      ? `已复核 v${rv.confirmedVersion}`
+      : "待复核";
+    li.appendChild(pill);
+    li.addEventListener("click", () => gotoPage(i));
+    li.title = isDone
+      ? `已按第 ${rv.confirmedVersion} 版遮盖画面复核确认（${rv.boxCount} 个框）`
+      : "跳转到该页，打开服务器烘焙预览后确认";
+    ul.appendChild(li);
+  });
+
+  const total = state.pages.length;
+  $("reviewCount").textContent = total ? `（${done}/${total}）` : "";
+  $("reviewBadge").textContent = total ? `复核 ${done} / ${total}` : "复核 0 / 0";
+
+  // 过期横幅：仅当停留在某页的烘焙画面、且该页框版本已落后时出现
+  $("staleBanner").hidden = !(state.sid && state.baked && pageStale());
+
+  // 当前页确认按钮 / 提示
+  const rv = state.review[state.page];
+  const curDone = !!(rv && rv.confirmed);
+  const stale = pageStale();
+  const btn = $("confirmPageBtn");
+  const hint = $("confirmHint");
+  $("repreviewBtn").disabled = !state.sid || !state.baked;
+  if (curDone) {
+    btn.disabled = true;
+    btn.textContent = `✔ 本页已复核（${rv.boxCount} 框，v${rv.confirmedVersion}）`;
+    hint.innerHTML = "本页已确认；若再改动遮盖框，确认将自动失效。";
+  } else if (!state.baked) {
+    btn.disabled = true;
+    btn.textContent = "✔ 确认本页";
+    hint.innerHTML = "请先勾选「最终效果预览（服务器烘焙）」查看该页最终画面。";
+  } else if (stale) {
+    btn.disabled = true;
+    btn.textContent = "✔ 确认本页";
+    hint.innerHTML =
+      '<span style="color:var(--danger)">画面已过期：该页遮盖在预览后被修改，请点「重新预览」。</span>';
+  } else {
+    btn.disabled = false;
+    btn.textContent = "✔ 确认本页";
+    const n = rv ? rv.boxCount : 0;
+    hint.innerHTML = `当前为服务器烘焙的最终画面（版本 v${state.bakedVersion}，${n} 个框），确认后定版。`;
+  }
+
+  $("deliverBtnSide").disabled = !state.sid || !state.allConfirmed || state.busy;
+  $("deliverMeta").innerHTML = state.allConfirmed
+    ? "✅ 全部页面已复核，可下载定版交付包。"
+    : `还有 ${total - done} 页待复核（含无遮盖框的页面）。`;
+}
+
+async function confirmCurrentPage() {
+  if (!state.sid || pageStale()) return;
+  state.busy = true;
+  refreshChrome();
+  try {
+    await api(`/api/${state.sid}/review/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page: state.page, version: state.bakedVersion }),
+    });
+    toast(`第 ${state.page + 1} 页已复核确认。`, true);
+    await refreshState(false);
+  } catch (err) {
+    if (/预览之后|409/.test(err.message)) {
+      toast("该页已被修改，请重新打开服务器烘焙预览后再确认。");
+    } else {
+      toast(err.message);
+    }
+    await refreshState(false);
+  } finally {
+    state.busy = false;
+    refreshChrome();
+  }
+}
+
+async function downloadDelivery() {
+  if (!state.sid || !state.allConfirmed || state.busy) return;
+  state.busy = true;
+  $("deliverBtn").disabled = true; $("deliverBtnSide").disabled = true;
+  try {
+    const res = await fetch(
+      `/api/${state.sid}/review/delivery?filename=${encodeURIComponent(state.filename)}`);
+    if (!res.ok) {
+      let detail = "生成失败";
+      try { detail = (await res.json()).detail || detail; } catch (_) {}
+      throw new Error(detail);
+    }
+    const sha = res.headers.get("X-Redacted-Pdf-Sha256");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = state.filename.replace(/\.pdf$/i, "") + "-reviewed.zip";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    if (state.deliverySha && sha && state.deliverySha !== sha) {
+      toast("警告：本次包内 PDF 与上次不同（期间有过修改并重新复核）。");
+    } else {
+      toast("定版交付包已下载（位图遮盖 PDF + manifest.json）。", true);
+    }
+    state.deliverySha = sha;
+    $("deliverMeta").innerHTML =
+      `包内 PDF SHA-256：<br><code style="font-size:10px;word-break:break-all">${escapeHtml(sha || "")}</code>`;
+  } catch (err) {
+    toast(err.message);
+    await refreshState(false);
+  } finally {
+    state.busy = false;
+    refreshChrome();
+  }
+}
+
+function startPolling() {
+  stopPolling();
+  state.pollTimer = setInterval(() => {
+    // 后台标签页不轮询；编辑请求在途时跳过（编辑完成会自行 refreshState）
+    if (document.hidden || state.busy) return;
+    refreshState(true);
+  }, 3000);
+}
+function stopPolling() {
+  if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+}
+
+// ---------------------------------------------------------------------------
 // 翻页 / 缩放 / 工具切换
 // ---------------------------------------------------------------------------
 function gotoPage(i) {
@@ -496,7 +773,7 @@ function gotoPage(i) {
   state.page = Math.max(0, Math.min(state.pages.length - 1, i));
   state.hoverId = null; state.drag = null;
   loadPageImage();
-  render(); refreshBoxList(); refreshChrome();
+  render(); refreshBoxList(); refreshChrome(); refreshReviewUI();
 }
 
 function setZoom(z) {
@@ -532,7 +809,14 @@ $("bakedToggle").addEventListener("change", async (e) => {
   $("bakedNote").hidden = !state.baked;
   loadPageImage();
   render();
+  refreshReviewUI();
 });
+
+$("confirmPageBtn").addEventListener("click", confirmCurrentPage);
+$("repreviewBtn").addEventListener("click", () => { if (state.sid && state.baked) loadPageImage(); });
+$("staleRepreview").addEventListener("click", () => { if (state.sid && state.baked) loadPageImage(); });
+$("deliverBtn").addEventListener("click", downloadDelivery);
+$("deliverBtnSide").addEventListener("click", downloadDelivery);
 
 $("zoomIn").addEventListener("click", () => setZoom(state.zoom * ZOOM_STEP));
 $("zoomOut").addEventListener("click", () => setZoom(state.zoom / ZOOM_STEP));
@@ -596,7 +880,11 @@ $("fileInput").addEventListener("change", async (e) => {
     state.pages = data.pages;
     state.page = 0;
     state.boxes = Object.fromEntries(data.pages.map((p) => [p.index, []]));
+    state.review = {};
+    state.allConfirmed = false;
+    state.deliverySha = null;
     state.baked = false;
+    state.bakedVersion = null;
     $("bakedToggle").checked = false;
     $("bakedNote").hidden = true;
     canvas.style.pointerEvents = "";
@@ -605,6 +893,8 @@ $("fileInput").addEventListener("change", async (e) => {
     zoomFit();
     loadPageImage();
     render();
+    await refreshState(false);
+    startPolling();
     toast(`已打开：${data.filename}（${data.pageCount} 页）`, true);
   } catch (err) {
     toast(err.message);
@@ -648,6 +938,7 @@ $("downloadBtn").addEventListener("click", async () => {
 // 初始化
 setMode("draw");
 refreshChrome();
+refreshReviewUI();
 </script>
 </body>
 </html>

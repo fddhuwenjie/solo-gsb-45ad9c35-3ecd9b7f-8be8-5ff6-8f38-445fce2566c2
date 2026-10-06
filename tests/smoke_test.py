@@ -1,6 +1,9 @@
 """端到端冒烟测试（不进镜像，仅开发环境用）。"""
+import hashlib
 import io
+import json
 import sys
+import zipfile
 import fitz
 from fastapi.testclient import TestClient
 
@@ -207,6 +210,171 @@ check("/api/health", client.get("/api/health").json()["status"] == "ok")
 check("/ 返回 HTML", client.get("/").status_code == 200 and
       "PDF" in client.get("/").text)
 check("未知会话 404", client.get("/api/deadbeef/state").status_code == 404)
+
+print("== 11. 逐页复核：版本令牌与 409 拒绝旧画面 ==")
+make_pdf("/tmp/rev.pdf", pages=2, rotations=(0, 0))
+with open("/tmp/rev.pdf", "rb") as f:
+    r = client.post("/api/upload", files={"file": ("rev.pdf", f, "application/pdf")})
+check("复核用 PDF 上传 200", r.status_code == 200)
+rid = r.json()["session"]
+
+st = client.get(f"/api/{rid}/state").json()["review"]
+check("初始两页均待复核",
+      all(not st["pages"][str(i)]["confirmed"] for i in range(2))
+      and st["allConfirmed"] is False, str(st))
+check("初始版本号=1", all(st["pages"][str(i)]["boxVersion"] == 1 for i in range(2)))
+
+# 干净预览不用于确认，但也带版本头
+r0 = client.get(f"/api/{rid}/page/0.png?zoom=2&redacted=false")
+check("预览响应带 X-Box-Version", r0.headers.get("X-Box-Version") == "1",
+      r0.headers.get("X-Box-Version"))
+
+# 烘焙第 1 页（0 框）并确认
+rb = client.get(f"/api/{rid}/page/0.png?zoom=2&redacted=true")
+v0 = int(rb.headers["X-Box-Version"])
+check("烘焙第1页版本=1", v0 == 1)
+r = client.post(f"/api/{rid}/review/confirm", json={"page": 0, "version": v0})
+check("确认第1页（无框页也要确认）200",
+      r.status_code == 200 and r.json()["boxCount"] == 0
+      and r.json()["allConfirmed"] is False, str(r.status_code))
+
+# 全部确认前定版交付 -> 409
+r = client.get(f"/api/{rid}/review/delivery")
+check("未全部确认时交付 409", r.status_code == 409)
+
+# 第 2 页加一个框（第 1 页确认不应受影响）
+client.post(f"/api/{rid}/boxes", json={
+    "page": 1, "rect": {"x0": 60, "y0": 52, "x1": 470, "y1": 110, "color": "black"}})
+st = client.get(f"/api/{rid}/state").json()["review"]
+check("他页编辑不影响已确认页", st["pages"]["0"]["confirmed"] is True)
+check("第2页版本升至 2", st["pages"]["1"]["boxVersion"] == 2
+      and st["pages"]["1"]["boxCount"] == 1)
+
+# 用加框前的旧版本号确认第 2 页 -> 409
+r = client.post(f"/api/{rid}/review/confirm", json={"page": 1, "version": 1})
+check("旧版本号确认 409", r.status_code == 409 and "重新" in r.json()["detail"])
+
+# 重新烘焙（拿到 v2）再确认
+rb2 = client.get(f"/api/{rid}/page/1.png?zoom=2&redacted=true")
+v1 = int(rb2.headers["X-Box-Version"])
+check("重新烘焙版本=2", v1 == 2)
+# 烘焙画面框内确实是黑的（确认的就是这张图）
+check("复核画面框内=黑", px(fitz.Pixmap(io.BytesIO(rb2.content)), 200, 80) == (0, 0, 0))
+r = client.post(f"/api/{rid}/review/confirm", json={"page": 1, "version": v1})
+check("确认第2页 200 且全部完成",
+      r.status_code == 200 and r.json()["allConfirmed"] is True, str(r.status_code))
+
+# 非法页码
+r = client.post(f"/api/{rid}/review/confirm", json={"page": 99, "version": 1})
+check("确认非法页码 400/422", r.status_code in (400, 422))
+
+print("== 12. 定版 ZIP：PDF + 清单，SHA-256 与确定性 ==")
+r = client.get(f"/api/{rid}/review/delivery?filename=rev.pdf")
+check("定版交付 200", r.status_code == 200, str(r.status_code))
+zip1 = r.content
+header_sha = r.headers.get("X-Redacted-Pdf-Sha256")
+zf = zipfile.ZipFile(io.BytesIO(zip1))
+check("ZIP 含 PDF 与 manifest",
+      sorted(zf.namelist()) == ["manifest.json", "rev-redacted.pdf"],
+      str(zf.namelist()))
+mani = json.loads(zf.read("manifest.json").decode("utf-8"))
+pdf_in_zip = zf.read("rev-redacted.pdf")
+calc_sha = hashlib.sha256(pdf_in_zip).hexdigest()
+check("清单 PDF 文件名正确", mani["redacted_pdf"] == "rev-redacted.pdf")
+check("清单 SHA-256 与包内 PDF 实际摘要一致",
+      mani["redacted_pdf_sha256"] == calc_sha, calc_sha[:16])
+check("响应头 SHA-256 与清单一致", header_sha == calc_sha, header_sha)
+check("清单记录每页确认框数 0/1",
+      [p["confirmed_box_count"] for p in mani["pages"]] == [0, 1],
+      str(mani["pages"]))
+check("清单记录页数/DPI", mani["page_count"] == 2 and mani["render_dpi"] == 200)
+d = fitz.open(stream=pdf_in_zip, filetype="pdf")
+check("交付 PDF 框内=黑/框外=灰",
+      px(d[1].get_pixmap(matrix=fitz.Matrix(2, 2)), 200, 80) == (0, 0, 0)
+      and px(d[1].get_pixmap(matrix=fitz.Matrix(2, 2)), 200, 300)[0] > 200)
+check("交付 PDF 无文字层",
+      "".join(p.get_text() for p in d).strip() == "")
+d.close()
+
+# 不做任何修改，重复下载 -> 完全相同的 ZIP（同一版确认与 PDF）
+zip2 = client.get(f"/api/{rid}/review/delivery?filename=rev.pdf").content
+check("无修改重复下载 ZIP 字节相同", zip1 == zip2)
+check("重复下载摘要一致",
+      hashlib.sha256(zip2).hexdigest() == hashlib.sha256(zip1).hexdigest())
+
+print("== 13. 复核后编辑：仅受影响页失效，旧交付包立即撤销 ==")
+# 起点：第1页已确认 v1(0 框)，第2页已确认 v2(1 框)，且 12 节已生成交付包。
+# (a) 在第 1 页加红框
+client.post(f"/api/{rid}/boxes", json={
+    "page": 0, "rect": {"x0": 10, "y0": 10, "x1": 100, "y1": 100, "color": "red"}})
+st = client.get(f"/api/{rid}/state").json()["review"]
+check("受影响页确认失效", st["pages"]["0"]["confirmed"] is False
+      and st["pages"]["0"]["boxVersion"] == 2
+      and st["pages"]["0"]["boxCount"] == 1)
+check("其他页确认保持有效", st["pages"]["1"]["confirmed"] is True)
+check("整体不再全部确认", st["allConfirmed"] is False)
+# 旧 ZIP 不得再被下发（尚未全部复核 -> 409），过期包不可下载
+r = client.get(f"/api/{rid}/review/delivery")
+check("失效期间旧交付包不可下载 409", r.status_code == 409)
+
+# (b) 删掉刚加的框：仍然只失效第 1 页（版本继续递增），第 2 页确认不动
+bid = client.get(f"/api/{rid}/state").json()["boxes"]["0"][0]["id"]
+client.post(f"/api/{rid}/boxes/delete", json={"page": 0, "id": bid})
+st = client.get(f"/api/{rid}/state").json()["review"]
+check("删框只失效该页",
+      st["pages"]["0"]["confirmed"] is False
+      and st["pages"]["0"]["boxVersion"] == 3
+      and st["pages"]["0"]["boxCount"] == 0
+      and st["pages"]["1"]["confirmed"] is True
+      and st["allConfirmed"] is False)
+
+# (c) 重新烘焙并确认第 1 页（0 框，v3）；再对这个"空页"执行清空 ——
+#     内容没有变化，版本与确认都应保留
+rb3 = client.get(f"/api/{rid}/page/0.png?zoom=2&redacted=true")
+check("空页重新烘焙版本=3", rb3.headers["X-Box-Version"] == "3")
+client.post(f"/api/{rid}/review/confirm",
+            json={"page": 0, "version": int(rb3.headers["X-Box-Version"])})
+client.post(f"/api/{rid}/boxes/clear", json={"page": 0})
+st = client.get(f"/api/{rid}/state").json()["review"]
+check("清空本就为空的页不影响其确认与版本",
+      st["pages"]["0"]["confirmed"] is True
+      and st["pages"]["0"]["confirmedVersion"] == 3)
+
+# (d) 清空"有框"的第 2 页：第 2 页失效，第 1 页不动
+client.post(f"/api/{rid}/boxes/clear", json={"page": 1})
+st = client.get(f"/api/{rid}/state").json()["review"]
+check("清空有框页使其失效",
+      st["pages"]["1"]["confirmed"] is False
+      and st["pages"]["1"]["boxVersion"] == 3
+      and st["pages"]["1"]["boxCount"] == 0)
+check("此时仅第1页确认", st["pages"]["0"]["confirmed"] is True
+      and st["allConfirmed"] is False)
+
+# 重新复核第 2 页（现在 0 框），再取交付包：必须对应新确认而非旧包
+rr = client.get(f"/api/{rid}/page/1.png?zoom=2&redacted=true")
+client.post(f"/api/{rid}/review/confirm",
+            json={"page": 1, "version": int(rr.headers["X-Box-Version"])})
+r = client.get(f"/api/{rid}/review/delivery?filename=rev.pdf")
+check("补齐复核后恢复交付 200", r.status_code == 200)
+znew = zipfile.ZipFile(io.BytesIO(r.content))
+mani_new = json.loads(znew.read("manifest.json").decode("utf-8"))
+check("新包对应新版确认（两页确认框数均为 0）",
+      [x["confirmed_box_count"] for x in mani_new["pages"]] == [0, 0],
+      str(mani_new["pages"]))
+check("新 PDF 摘要与旧包不同（旧包第2页有框）",
+      mani_new["redacted_pdf_sha256"] != calc_sha)
+# 新版停止修改后重复下载仍然逐字节相同
+zip_a = r.content
+zip_b = client.get(f"/api/{rid}/review/delivery?filename=rev.pdf").content
+check("新版无修改重复下载 ZIP 字节相同", zip_a == zip_b)
+
+print("== 14. 普通下载/预览/Compose 启动方式保持可用 ==")
+r = client.get(f"/api/{rid}/download?filename=rev.pdf")
+check("普通下载始终可用（无需复核）", r.status_code == 200
+      and r.headers["content-type"] == "application/pdf")
+check("干净/烘焙预览均可用",
+      client.get(f"/api/{rid}/page/0.png?zoom=1.5&redacted=false").status_code == 200
+      and client.get(f"/api/{rid}/page/0.png?zoom=1.5&redacted=true").status_code == 200)
 
 print(f"\n结果：{len(PASS)} 通过，{len(FAIL)} 失败")
 if FAIL:
