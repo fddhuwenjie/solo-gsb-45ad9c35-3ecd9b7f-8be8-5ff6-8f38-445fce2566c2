@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF 遮盖工作台</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #1e293b; --panel2: #273449; --line: #334155;
+    --text: #e2e8f0; --muted: #94a3b8; --accent: #38bdf8; --danger: #f87171;
+    --ok: #34d399; --warn: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column;
+  }
+  header {
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 16px; margin: 0; white-space: nowrap; }
+  header .spacer { flex: 1; }
+  .btn {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px;
+  }
+  .btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.primary { background: #0369a1; border-color: #0ea5e9; color: #fff; }
+  .btn.primary:hover:not(:disabled) { background: #0284c7; color: #fff; }
+  .btn.danger { color: var(--danger); }
+  .btn.danger:hover:not(:disabled) { border-color: var(--danger); }
+  main { flex: 1; display: flex; min-height: 0; }
+
+  /* 左侧工具栏 */
+  aside {
+    width: 264px; flex: none; background: var(--panel);
+    border-right: 1px solid var(--line); padding: 14px; overflow-y: auto;
+  }
+  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+             color: var(--muted); margin: 18px 0 8px; }
+  aside h2:first-child { margin-top: 0; }
+  .file-label {
+    display: block; border: 1.5px dashed var(--line); border-radius: 8px;
+    padding: 16px 10px; text-align: center; color: var(--muted); cursor: pointer;
+  }
+  .file-label:hover { border-color: var(--accent); color: var(--accent); }
+  .file-label input { display: none; }
+  .mode-group { display: flex; gap: 6px; }
+  .mode-group .btn { flex: 1; }
+  .mode-group .btn.active { background: #0369a1; border-color: #0ea5e9; color: #fff; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  select, input[type="color"] {
+    background: var(--panel2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px;
+  }
+  select { flex: 1; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .hint kbd {
+    background: var(--panel2); border: 1px solid var(--line);
+    border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-size: 11px;
+  }
+  ul.boxlist { list-style: none; margin: 0; padding: 0; max-height: 200px; overflow-y: auto; }
+  ul.boxlist li {
+    display: flex; align-items: center; gap: 8px; padding: 4px 6px;
+    border-radius: 5px; font-size: 12px; cursor: pointer;
+  }
+  ul.boxlist li:hover { background: var(--panel2); }
+  ul.boxlist .swatch { width: 12px; height: 12px; border-radius: 2px;
+    border: 1px solid rgba(255,255,255,.3); flex: none; }
+  ul.boxlist .del { margin-left: auto; color: var(--danger); }
+  ul.boxlist .empty { color: var(--muted); cursor: default; }
+
+  /* 预览区 */
+  .stage-wrap { flex: 1; overflow: auto; padding: 24px; position: relative; }
+  .stage { position: relative; margin: 0 auto; width: max-content;
+           box-shadow: 0 8px 30px rgba(0,0,0,.5); }
+  #pageImg, #overlay {
+    display: block; width: var(--view-w); height: var(--view-h);
+    background: #fff;
+  }
+  #overlay { position: absolute; inset: 0; touch-action: none; }
+  #overlay.draw { cursor: crosshair; }
+  #overlay.erase { cursor: not-allowed; }
+
+  .zoombar {
+    position: sticky; bottom: 12px; margin: 16px auto -4px; width: max-content;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+    padding: 4px 8px; display: flex; align-items: center; gap: 4px;
+  }
+  .zoombar .btn { border-radius: 999px; padding: 3px 10px; }
+  .zoombar #zoomLabel { min-width: 58px; text-align: center; color: var(--muted); }
+
+  .toast {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    background: #7f1d1d; border: 1px solid var(--danger); color: #fee2e2;
+    padding: 10px 18px; border-radius: 8px; z-index: 50; max-width: 70vw;
+    box-shadow: 0 10px 30px rgba(0,0,0,.4);
+  }
+  .toast.ok { background: #064e3b; border-color: var(--ok); color: #d1fae5; }
+  .badge { background: var(--panel2); border: 1px solid var(--line);
+           border-radius: 6px; padding: 3px 9px; color: var(--muted); font-size: 12px; }
+  .baked-note {
+    background: #422006; border: 1px solid var(--warn); color: #fef3c7;
+    border-radius: 6px; padding: 6px 10px; font-size: 12px; margin-top: 10px;
+  }
+  .chk { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📄 PDF 遮盖工作台</h1>
+  <span class="badge" id="fileBadge">尚未打开文档</span>
+  <div class="spacer"></div>
+  <button class="btn" id="prevPageTop" disabled>‹ 上一页</button>
+  <span class="badge" id="pageBadge">— / —</span>
+  <button class="btn" id="nextPageTop" disabled>下一页 ›</button>
+  <button class="btn primary" id="downloadBtn" disabled>⬇ 下载遮盖副本</button>
+</header>
+
+<main>
+  <aside>
+    <h2>文档</h2>
+    <label class="file-label">
+      选择 PDF（1–8 页，≤100MB）
+      <input type="file" id="fileInput" accept="application/pdf,.pdf">
+    </label>
+    <div class="hint" id="pageInfo" style="margin-top:8px"></div>
+
+    <h2>工具</h2>
+    <div class="mode-group">
+      <button class="btn active" id="modeDraw">✏️ 画框</button>
+      <button class="btn" id="modeErase">🩹 删除</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <span class="hint">颜色</span>
+      <select id="colorSelect">
+        <option value="black">不透明黑</option>
+        <option value="white">不透明白</option>
+        <option value="red">红</option>
+        <option value="blue">蓝</option>
+        <option value="green">绿</option>
+        <option value="yellow">黄</option>
+      </select>
+    </div>
+    <label class="chk hint" style="margin-top:8px">
+      <input type="checkbox" id="bakedToggle"> 最终效果预览（服务器烘焙）
+    </label>
+    <div class="baked-note" id="bakedNote" hidden>
+      此图由服务器用与下载完全相同的光栅化路径生成；该模式下不可编辑，关闭后继续画框。
+    </div>
+
+    <h2>本页遮盖框 <span class="hint" id="boxCount"></span></h2>
+    <ul class="boxlist" id="boxList"></ul>
+    <button class="btn danger" id="clearPageBtn" style="width:100%;margin-top:8px" disabled>
+      清空本页所有框
+    </button>
+
+    <h2>操作说明</h2>
+    <div class="hint">
+      <p style="margin:4px 0">· 画框模式：在页面上按住拖动，松开即添加。</p>
+      <p style="margin:4px 0">· 删除模式：点击框删除；或在画框模式悬停框后按 <kbd>Delete</kbd>。</p>
+      <p style="margin:4px 0">· <kbd>←</kbd> <kbd>→</kbd> 翻页，<kbd>+</kbd> <kbd>−</kbd> 缩放，<kbd>D</kbd>/<kbd>E</kbd> 切换工具。</p>
+      <p style="margin:4px 0">· 坐标以 PDF 点存储，任意缩放下框都锚定相同内容；旋转页与裁切页同样准确。</p>
+    </div>
+  </aside>
+
+  <div class="stage-wrap" id="stageWrap">
+    <div class="stage" id="stage" hidden>
+      <img id="pageImg" alt="PDF 页面预览">
+      <canvas id="overlay" class="draw"></canvas>
+    </div>
+    <div class="zoombar" id="zoombar" hidden>
+      <button class="btn" id="zoomOut">−</button>
+      <span id="zoomLabel">100%</span>
+      <button class="btn" id="zoomIn">＋</button>
+      <button class="btn" id="zoomFit">适应</button>
+    </div>
+  </div>
+</main>
+
+<script>
+"use strict";
+
+// 服务器渲染底图时使用的固定缩放（保证清晰度）；显示缩放由 CSS width/height 完成，
+// canvas 与 <img> 同尺寸，所有框坐标统一换算为 PDF 点。
+const RENDER_SCALE = 2.0;
+const MIN_ZOOM = 0.2, MAX_ZOOM = 4.0, ZOOM_STEP = 1.15;
+const MIN_BOX_PT = 1.0;   // 小于 1 点视为误触，不提交
+
+const $ = (id) => document.getElementById(id);
+
+const state = {
+  sid: null,
+  filename: "document.pdf",
+  pages: [],                 // [{index,width,height,rotation}]
+  boxes: {},                 // pageIndex -> [{id,x0,y0,x1,y1,color}]
+  page: 0,
+  zoom: 1.0,
+  imgScale: 1,               // CSS 像素 -> PDF 点 的系数（随底图尺寸更新）
+  mode: "draw",
+  baked: false,
+  drag: null,                // {x0,y0,x1,y1} CSS 像素
+  hoverId: null,
+  busy: false,
+};
+
+// ---------------------------------------------------------------------------
+// 小工具
+// ---------------------------------------------------------------------------
+function toast(msg, ok = false) {
+  const el = document.createElement("div");
+  el.className = "toast" + (ok ? " ok" : "");
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 4200);
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(path, options);
+  if (!res.ok) {
+    let detail = `请求失败（${res.status}）`;
+    try { detail = (await res.json()).detail || detail; } catch (_) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+function curPage() { return state.pages[state.page]; }
+function curBoxes() { return state.boxes[state.page] || []; }
+function pageW() { return curPage() ? curPage().width : 0; }
+function pageH() { return curPage() ? curPage().height : 0; }
+
+// CSS 像素 -> PDF 显示坐标点
+function cssToPt(x, y) { return { x: x * state.imgScale, y: y * state.imgScale }; }
+
+// ---------------------------------------------------------------------------
+// 底图加载（缩放改变时只改 CSS 尺寸；换页 / 切换烘焙模式时重新取图）
+// ---------------------------------------------------------------------------
+const img = $("pageImg"), canvas = $("overlay"), stage = $("stage");
+const ctx = canvas.getContext("2d");
+
+function applyViewSize() {
+  if (!curPage()) return;
+  const w = Math.round(pageW() * state.zoom);
+  const h = Math.round(pageH() * state.zoom);
+  stage.style.setProperty("--view-w", w + "px");
+  stage.style.setProperty("--view-h", h + "px");
+  canvas.width = w; canvas.height = h;
+  state.imgScale = pageW() / w;   // css px -> pt
+  $("zoomLabel").textContent = Math.round(state.zoom * 100) + "%";
+}
+
+function loadPageImage() {
+  if (!state.sid) return;
+  const red = state.baked ? "&redacted=true" : "";
+  img.src = `/api/${state.sid}/page/${state.page}.png?zoom=${RENDER_SCALE}${red}`;
+  img.onload = () => { applyViewSize(); render(); };
+}
+
+// ---------------------------------------------------------------------------
+// 遮盖框绘制（即时反映当前遮盖状态）
+// ---------------------------------------------------------------------------
+const COLOR_HEX = {
+  black: "#000000", white: "#ffffff", red: "#dc2626",
+  blue: "#2563eb", green: "#16a34a", yellow: "#e3b41e",
+};
+
+function ptToCssPx(v) { return v / state.imgScale; }
+
+function drawBox(b, opts = {}) {
+  const x = ptToCssPx(Math.min(b.x0, b.x1));
+  const y = ptToCssPx(Math.min(b.y0, b.y1));
+  const w = ptToCssPx(Math.abs(b.x1 - b.x0));
+  const h = ptToCssPx(Math.abs(b.y1 - b.y0));
+  ctx.fillStyle = COLOR_HEX[b.color] || "#000";
+  ctx.fillRect(x, y, w, h);
+  if (opts.hover || opts.preview) {
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = opts.hover ? "#f43f5e" : "#38bdf8";
+    ctx.setLineDash(opts.preview ? [6, 4] : []);
+    ctx.strokeRect(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2));
+    ctx.setLineDash([]);
+  }
+}
+
+function render() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!curPage() || state.baked) return;
+  for (const b of curBoxes()) drawBox(b, { hover: state.hoverId === b.id });
+  if (state.drag) {
+    drawBox({
+      x0: state.drag.x0 * state.imgScale,
+      y0: state.drag.y0 * state.imgScale,
+      x1: state.drag.x1 * state.imgScale,
+      y1: state.drag.y1 * state.imgScale,
+      color: $("colorSelect").value,
+    }, { preview: true });
+  }
+}
+
+function hitTest(cssX, cssY) {
+  const { x, y } = cssToPt(cssX, cssY);
+  const boxes = curBoxes();
+  // 后画的在上层，自顶向下命中
+  for (let i = boxes.length - 1; i >= 0; i--) {
+    const b = boxes[i];
+    if (x >= Math.min(b.x0, b.x1) && x <= Math.max(b.x0, b.x1) &&
+        y >= Math.min(b.y0, b.y1) && y <= Math.max(b.y0, b.y1)) {
+      return b;
+    }
+  }
+  return null;
+}
+
+function localPos(e) {
+  const r = canvas.getBoundingClientRect();
+  return {
+    x: Math.max(0, Math.min(canvas.width, e.clientX - r.left)),
+    y: Math.max(0, Math.min(canvas.height, e.clientY - r.top)),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 鼠标 / 触摸
+// ---------------------------------------------------------------------------
+canvas.addEventListener("pointerdown", (e) => {
+  if (!state.sid || state.baked || state.busy) return;
+  canvas.setPointerCapture(e.pointerId);
+  const p = localPos(e);
+
+  if (state.mode === "erase") {
+    const hit = hitTest(p.x, p.y);
+    if (hit) deleteBox(hit);
+    return;
+  }
+
+  const hit = hitTest(p.x, p.y);
+  if (hit) { state.hoverId = hit.id; }   // 按住已有框不新建，留给 Delete
+  state.drag = { x0: p.x, y0: p.y, x1: p.x, y1: p.y, moved: false, startHit: hit };
+  render();
+});
+
+canvas.addEventListener("pointermove", (e) => {
+  if (!state.sid || state.baked) return;
+  const p = localPos(e);
+  if (state.drag) {
+    state.drag.x1 = p.x; state.drag.y1 = p.y;
+    state.drag.moved = true;
+    render();
+  } else if (state.mode === "draw") {
+    const hit = hitTest(p.x, p.y);
+    state.hoverId = hit ? hit.id : null;
+    canvas.style.cursor = hit ? "pointer" : "crosshair";
+    render();
+  } else {
+    const hit = hitTest(p.x, p.y);
+    state.hoverId = hit ? hit.id : null;
+    canvas.style.cursor = hit ? "not-allowed" : "default";
+    render();
+  }
+});
+
+canvas.addEventListener("pointerup", async (e) => {
+  if (!state.drag || state.baked) { state.drag = null; return; }
+  const d = state.drag;
+  state.drag = null;
+  canvas.releasePointerCapture(e.pointerId);
+  const a = cssToPt(d.x0, d.y0), b = cssToPt(d.x1, d.y1);
+  const tiny = Math.abs(b.x - a.x) < MIN_BOX_PT || Math.abs(b.y - a.y) < MIN_BOX_PT;
+  // 点击（非拖动）落在已有框上：不新建，交给 Delete 或删除模式
+  if (d.moved && !tiny) {
+    await addBox({
+      x0: a.x, y0: a.y, x1: b.x, y1: b.y,
+      color: $("colorSelect").value,
+    });
+  } else {
+    render();
+  }
+});
+
+canvas.addEventListener("pointercancel", () => { state.drag = null; render(); });
+
+// ---------------------------------------------------------------------------
+// 与服务器同步框
+// ---------------------------------------------------------------------------
+async function addBox(rect) {
+  state.busy = true;
+  try {
+    const out = await api(`/api/${state.sid}/boxes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page: state.page, rect }),
+    });
+    state.boxes[state.page].push({ id: out.id, ...out.rect });
+    render(); refreshBoxList();
+  } catch (err) { toast(err.message); render(); }
+  finally { state.busy = false; }
+}
+
+async function deleteBox(box) {
+  state.busy = true;
+  try {
+    await api(`/api/${state.sid}/boxes/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page: state.page, id: box.id }),
+    });
+    state.boxes[state.page] = curBoxes().filter((b) => b.id !== box.id);
+    state.hoverId = null;
+    render(); refreshBoxList();
+  } catch (err) { toast(err.message); }
+  finally { state.busy = false; }
+}
+
+async function clearPageBoxes() {
+  if (!curBoxes().length) return;
+  if (!confirm(`确定清空第 ${state.page + 1} 页的全部 ${curBoxes().length} 个遮盖框？`)) return;
+  try {
+    await api(`/api/${state.sid}/boxes/clear`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page: state.page }),
+    });
+    state.boxes[state.page] = [];
+    render(); refreshBoxList();
+  } catch (err) { toast(err.message); }
+}
+
+// ---------------------------------------------------------------------------
+// 框列表 / 页面信息
+// ---------------------------------------------------------------------------
+function refreshBoxList() {
+  const ul = $("boxList");
+  ul.innerHTML = "";
+  const boxes = curBoxes();
+  $("boxCount").textContent = boxes.length ? `（${boxes.length}）` : "";
+  $("clearPageBtn").disabled = boxes.length === 0;
+  if (!boxes.length) {
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = "本页暂无遮盖框";
+    ul.appendChild(li);
+    return;
+  }
+  boxes.forEach((b, i) => {
+    const li = document.createElement("li");
+    const sw = document.createElement("span");
+    sw.className = "swatch";
+    sw.style.background = COLOR_HEX[b.color] || "#000";
+    li.appendChild(sw);
+    const txt = document.createElement("span");
+    txt.textContent = `#${i + 1}  ${Math.round(Math.min(b.x0,b.x1))},${Math.round(Math.min(b.y0,b.y1))} ` +
+                      `${Math.round(Math.abs(b.x1-b.x0))}×${Math.round(Math.abs(b.y1-b.y0))} pt`;
+    li.appendChild(txt);
+    const del = document.createElement("span");
+    del.className = "del"; del.textContent = "✕"; del.title = "删除";
+    li.appendChild(del);
+    li.addEventListener("click", () => deleteBox(b));
+    ul.appendChild(li);
+  });
+}
+
+function refreshChrome() {
+  const has = !!state.sid;
+  $("downloadBtn").disabled = !has || state.busy;
+  $("prevPageTop").disabled = !has || state.page === 0;
+  $("nextPageTop").disabled = !has || state.page === state.pages.length - 1;
+  $("pageBadge").textContent = has ? `${state.page + 1} / ${state.pages.length}` : "— / —";
+  if (has) {
+    const p = curPage();
+    const orient = p.width >= p.height ? "横向" : "纵向";
+    $("pageInfo").innerHTML =
+      `文件：${escapeHtml(state.filename)}<br>` +
+      `页数：${state.pages.length}　当前页：${p.width}×${p.height} pt<br>` +
+      `方向：${orient}　旋转标记：${p.rotation}°`;
+    $("fileBadge").textContent = state.filename;
+  }
+  $("stage").hidden = !has;
+  $("zoombar").hidden = !has;
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// ---------------------------------------------------------------------------
+// 翻页 / 缩放 / 工具切换
+// ---------------------------------------------------------------------------
+function gotoPage(i) {
+  if (!state.sid) return;
+  state.page = Math.max(0, Math.min(state.pages.length - 1, i));
+  state.hoverId = null; state.drag = null;
+  loadPageImage();
+  render(); refreshBoxList(); refreshChrome();
+}
+
+function setZoom(z) {
+  state.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z));
+  applyViewSize();
+  render();
+}
+
+function zoomFit() {
+  if (!curPage()) return;
+  const wrap = $("stageWrap");
+  const pad = 70;
+  const zW = (wrap.clientWidth - pad) / pageW();
+  const zH = (wrap.clientHeight - pad - 70) / pageH();
+  setZoom(Math.max(MIN_ZOOM, Math.min(1.5, Math.min(zW, zH))));
+}
+
+function setMode(mode) {
+  state.mode = mode;
+  $("modeDraw").classList.toggle("active", mode === "draw");
+  $("modeErase").classList.toggle("active", mode === "erase");
+  canvas.classList.toggle("draw", mode === "draw");
+  canvas.classList.toggle("erase", mode === "erase");
+}
+
+$("modeDraw").addEventListener("click", () => setMode("draw"));
+$("modeErase").addEventListener("click", () => setMode("erase"));
+$("colorSelect").addEventListener("change", render);
+
+$("bakedToggle").addEventListener("change", async (e) => {
+  state.baked = e.target.checked;
+  canvas.style.pointerEvents = state.baked ? "none" : "";
+  $("bakedNote").hidden = !state.baked;
+  loadPageImage();
+  render();
+});
+
+$("zoomIn").addEventListener("click", () => setZoom(state.zoom * ZOOM_STEP));
+$("zoomOut").addEventListener("click", () => setZoom(state.zoom / ZOOM_STEP));
+$("zoomFit").addEventListener("click", zoomFit);
+$("prevPageTop").addEventListener("click", () => gotoPage(state.page - 1));
+$("nextPageTop").addEventListener("click", () => gotoPage(state.page + 1));
+$("clearPageBtn").addEventListener("click", clearPageBoxes);
+
+img.addEventListener("error", () => toast("页面预览加载失败，请重试。"));
+
+document.addEventListener("keydown", (e) => {
+  if (!state.sid || e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  if (e.key === "Delete" || e.key === "Backspace") {
+    if (state.hoverId) {
+      const b = curBoxes().find((x) => x.id === state.hoverId);
+      if (b) { e.preventDefault(); deleteBox(b); }
+    }
+  } else if (e.key === "ArrowLeft") gotoPage(state.page - 1);
+  else if (e.key === "ArrowRight") gotoPage(state.page + 1);
+  else if (e.key === "+" || e.key === "=") setZoom(state.zoom * ZOOM_STEP);
+  else if (e.key === "-") setZoom(state.zoom / ZOOM_STEP);
+  else if (e.key.toLowerCase() === "d") setMode("draw");
+  else if (e.key.toLowerCase() === "e") setMode("erase");
+});
+
+// Ctrl+滚轮缩放（普通滚轮留给滚动条）
+$("stageWrap").addEventListener("wheel", (e) => {
+  if (e.ctrlKey && state.sid) {
+    e.preventDefault();
+    setZoom(state.zoom * (e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP));
+  }
+}, { passive: false });
+
+// ---------------------------------------------------------------------------
+// 上传
+// ---------------------------------------------------------------------------
+$("fileInput").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+
+  // 先校验扩展名/MIME，上传失败时保留当前正在编辑的文档不动
+  if (!/\.pdf$/i.test(file.name) && file.type !== "application/pdf") {
+    toast("请选择 PDF 文件。");
+    return;
+  }
+  const fd = new FormData();
+  fd.append("file", file);
+  state.busy = true; $("downloadBtn").disabled = true;
+  try {
+    const out = await fetch("/api/upload", { method: "POST", body: fd });
+    if (!out.ok) {
+      let detail = "上传失败";
+      try { detail = (await out.json()).detail || detail; } catch (_) {}
+      throw new Error(detail);
+    }
+    const data = await out.json();
+    // 仅在服务器完整校验通过后才切换会话，避免覆盖正在编辑的文档
+    state.sid = data.session;
+    state.filename = data.filename;
+    state.pages = data.pages;
+    state.page = 0;
+    state.boxes = Object.fromEntries(data.pages.map((p) => [p.index, []]));
+    state.baked = false;
+    $("bakedToggle").checked = false;
+    $("bakedNote").hidden = true;
+    canvas.style.pointerEvents = "";
+    refreshChrome();
+    refreshBoxList();
+    zoomFit();
+    loadPageImage();
+    render();
+    toast(`已打开：${data.filename}（${data.pageCount} 页）`, true);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    state.busy = false;
+    refreshChrome();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 下载
+// ---------------------------------------------------------------------------
+$("downloadBtn").addEventListener("click", async () => {
+  if (!state.sid || state.busy) return;
+  state.busy = true; $("downloadBtn").disabled = true;
+  try {
+    const res = await fetch(`/api/${state.sid}/download?filename=${encodeURIComponent(state.filename)}`);
+    if (!res.ok) {
+      let detail = "生成失败";
+      try { detail = (await res.json()).detail || detail; } catch (_) {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = state.filename.replace(/\.pdf$/i, "") + "-redacted.pdf";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast("遮盖副本已生成并开始下载。", true);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    state.busy = false;
+    refreshChrome();
+  }
+});
+
+// 初始化
+setMode("draw");
+refreshChrome();
+</script>
+</body>
+</html>

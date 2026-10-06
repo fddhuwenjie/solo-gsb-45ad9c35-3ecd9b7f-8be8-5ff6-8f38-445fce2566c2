@@ -1,0 +1,16 @@
+services:
+  pdf-redactor:
+    build: .
+    image: pdf-redactor:latest
+    container_name: pdf-redactor
+    ports:
+      # 宿主机端口:容器端口；如 8000 被占用，把左边改成例如 "8080:8000"
+      - "8000:8000"
+    restart: unless-stopped
+    # 文档只存在于进程内存，不挂载卷、不落盘；
+    # /tmp 仅供 python-multipart 对较大上传做临时缓冲
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    security_opt:
+      - no-new-privileges:true
